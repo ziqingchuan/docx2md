@@ -18,7 +18,8 @@ INPUT_PATH = r"example2.docx"
 XML_OUTPUT_DIR = "XMLFile"
 MD_OUTPUT_DIR = "MarkdownFile"
 IMAGE_OUTPUT_DIR = "Images"
-IMAGE_COUNT = 1
+PNG_COUNT = 1
+WMF_COUNT = 1
 Path(IMAGE_OUTPUT_DIR).mkdir(exist_ok=True)
 # 创建输出目录（如果不存在）
 Path(XML_OUTPUT_DIR).mkdir(exist_ok=True)
@@ -50,82 +51,146 @@ def dump_document_xml_via_python_docx(docx_path, output_xml_path, pretty_print=T
     print(f"\nXML内容已保存到 {output_xml_path}")
 
 
+import re
+import zipfile
+from pathlib import Path
+
 def extract_and_number_images(docx_path):
     """
-    从.docx中提取所有图片并按顺序编号保存到Images/{docName}_images文件夹
+    仅从 .docx 中提取 PNG、WMF/EMF/WMZ 与 BIN 文件并按顺序编号保存到：
+      - Images/{docName}_images/PNG/
+      - Images/{docName}_images/WMF/
+      - Images/{docName}_images/BIN/
 
-    参数:
-        docx_path: .docx文件路径
+    编号规则（各自独立）：
+      - 在每个类型（PNG / WMF / BIN）内部：
+          * 先处理文件名不以数字结尾的文件（按出现顺序）
+          * 然后处理文件名以数字结尾的文件（按尾部数字升序）
+      - 输出文件名形式为 image{N}{ext}（ext 保留原始扩展名），各类型从1开始独立编号
 
     返回:
-        - 图片保存路径列表 (Images/{docName}_images/image1.png, ...)
+        - 图片保存路径列表（字符串列表，按保存顺序）
         - 图片总数
     """
-    # 获取文档名并创建对应的图片文件夹
-    doc_name = Path(docx_path).stem
-    images_dir = Path("Images") / f"{doc_name}_images"
-    images_dir.mkdir(parents=True, exist_ok=True)
+    docx_path = Path(docx_path)
+    doc_name = docx_path.stem
+    base_images_dir = Path("Images") / f"{doc_name}_images"
+    png_dir = base_images_dir / "PNG"
+    wmf_dir = base_images_dir / "WMF"
+    bin_dir = base_images_dir / "BIN"
+    png_dir.mkdir(parents=True, exist_ok=True)
+    wmf_dir.mkdir(parents=True, exist_ok=True)
+    bin_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"[图片提取] 图片将保存到: {images_dir}")
+    print(f"[图片提取] 处理 PNG / WMF(EMF/WMZ) / BIN。输出目录: {base_images_dir}")
 
     image_paths = []
+    # 每种类型独立计数
+    counters = {
+        'PNG': 1,
+        'WMF': 1,
+        'BIN': 1,
+    }
 
     with zipfile.ZipFile(docx_path, 'r') as z:
-        # 获取所有图片文件（支持多种格式）
-        media_files = [f for f in z.namelist()
-                       if 'media' in f.lower() and
-                       any(f.lower().endswith(ext) for ext in ['.png'])]
+        # 关注 word/media 和 word/embeddings 等路径下的文件
+        candidate_files = [f for f in z.namelist()
+                           if ('media' in f.lower() or 'embeddings' in f.lower())
+                           and not f.endswith('/')]  # 排除目录条目
 
-        print(f"[图片提取] 找到 {len(media_files)} 个图片文件")
+        # 只保留 png、wmf/emf/wmz、bin
+        wanted_exts = ['.png', '.wmf', '.emf', '.wmz', '.bin']
+        media_files = [f for f in candidate_files if any(f.lower().endswith(ext) for ext in wanted_exts)]
 
-        # 分离有数字和无数字的文件
-        numbered_files = []
-        unnumbered_files = []
+        print(f"[图片提取] 在 zip 中找到 {len(media_files)} 个 PNG/WMF/BIN 候选文件")
 
-        for f in media_files:
-            filename = Path(f).stem.lower()
-            if re.search(r'\d+$', filename):  # 如果文件名以数字结尾
-                numbered_files.append(f)
-            else:
-                unnumbered_files.append(f)
+        # 按类型分组
+        png_files = [f for f in media_files if f.lower().endswith('.png')]
+        wmf_files = [f for f in media_files if any(f.lower().endswith(ext) for ext in ('.wmf', '.emf', '.wmz'))]
+        bin_files = [f for f in media_files if f.lower().endswith('.bin')]
 
-        # 首先处理无数字的文件（视为第一个）
-        print("[图片提取] 处理无数字的图片文件...")
-        for i, media_file in enumerate(unnumbered_files):
-            # 获取文件扩展名
-            ext = Path(media_file).suffix.lower()
-            if not ext:  # 如果没有扩展名，默认使用.png
-                ext = '.png'
+        def split_numbered(file_list):
+            numbered = []
+            unnumbered = []
+            for f in file_list:
+                filename_stem = Path(f).stem.lower()
+                if re.search(r'\d+$', filename_stem):
+                    numbered.append(f)
+                else:
+                    unnumbered.append(f)
+            return unnumbered, numbered
 
-            output_filename = f"image{i + 1}{ext}"
-            output_path = images_dir / output_filename
+        def sort_by_trailing_num(file_list):
+            def trailing_num_key(path_str):
+                m = re.search(r'(\d+)$', Path(path_str).stem.lower())
+                return int(m.group(1)) if m else 0
+            return sorted(file_list, key=trailing_num_key)
 
-            # 保存图片
-            with open(output_path, 'wb') as f:
-                f.write(z.read(media_file))
+        # 处理 PNG（独立编号）
+        print("[图片提取] 处理 PNG 文件...")
+        png_unnumbered, png_numbered = split_numbered(png_files)
+        # 无数字先按出现顺序
+        for f in png_unnumbered:
+            ext = Path(f).suffix.lower() or '.png'
+            out_name = f"image{counters['PNG']}{ext}"
+            out_path = png_dir / out_name
+            with open(out_path, 'wb') as out_f:
+                out_f.write(z.read(f))
+            image_paths.append(str(out_path))
+            counters['PNG'] += 1
+        # 有数字按尾部数字排序
+        for f in sort_by_trailing_num(png_numbered):
+            ext = Path(f).suffix.lower() or '.png'
+            out_name = f"image{counters['PNG']}{ext}"
+            out_path = png_dir / out_name
+            with open(out_path, 'wb') as out_f:
+                out_f.write(z.read(f))
+            image_paths.append(str(out_path))
+            counters['PNG'] += 1
 
-            image_paths.append(str(output_path))
-            print(f"  - 保存: {media_file} -> {output_path}")
+        # 处理 WMF/EMF/WMZ（独立编号）
+        print("[图片提取] 处理 WMF/EMF/WMZ 文件...")
+        wmf_unnumbered, wmf_numbered = split_numbered(wmf_files)
+        for f in wmf_unnumbered:
+            ext = Path(f).suffix.lower() or '.wmf'
+            out_name = f"image{counters['WMF']}{ext}"
+            out_path = wmf_dir / out_name
+            with open(out_path, 'wb') as out_f:
+                out_f.write(z.read(f))
+            image_paths.append(str(out_path))
+            counters['WMF'] += 1
+        for f in sort_by_trailing_num(wmf_numbered):
+            ext = Path(f).suffix.lower() or '.wmf'
+            out_name = f"image{counters['WMF']}{ext}"
+            out_path = wmf_dir / out_name
+            with open(out_path, 'wb') as out_f:
+                out_f.write(z.read(f))
+            image_paths.append(str(out_path))
+            counters['WMF'] += 1
 
-        # 然后处理有数字的文件，按数字排序
-        print("[图片提取] 处理有数字的图片文件...")
-        numbered_files.sort(key=lambda x: int(re.search(r'\d+$', Path(x).stem.lower()).group()))
+        # 处理 BIN（独立编号，直接保存 .bin 文件）
+        print("[图片提取] 处理 BIN 文件...")
+        bin_unnumbered, bin_numbered = split_numbered(bin_files)
+        for f in bin_unnumbered:
+            ext = Path(f).suffix.lower() or '.bin'
+            out_name = f"image{counters['BIN']}{ext}"
+            out_path = bin_dir / out_name
+            with open(out_path, 'wb') as out_f:
+                out_f.write(z.read(f))
+            image_paths.append(str(out_path))
+            counters['BIN'] += 1
+        for f in sort_by_trailing_num(bin_numbered):
+            ext = Path(f).suffix.lower() or '.bin'
+            out_name = f"image{counters['BIN']}{ext}"
+            out_path = bin_dir / out_name
+            with open(out_path, 'wb') as out_f:
+                out_f.write(z.read(f))
+            image_paths.append(str(out_path))
+            counters['BIN'] += 1
 
-        start_index = len(unnumbered_files) + 1
-        for i, media_file in enumerate(numbered_files):
-            # 保留原始文件扩展名
-            ext = Path(media_file).suffix.lower()
-            output_filename = f"image{start_index + i}{ext}"
-            output_path = images_dir / output_filename
-
-            # 保存图片
-            with open(output_path, 'wb') as f:
-                f.write(z.read(media_file))
-
-            image_paths.append(str(output_path))
-
-    print(f"[图片提取] 完成！共保存 {len(image_paths)} 张图片")
-    return image_paths, len(image_paths)
+    total = len(image_paths)
+    print(f"[图片提取] 完成！共保存 {total} 个文件（PNG: {counters['PNG'] - 1} 张, WMF: {counters['WMF'] - 1} 张, BIN: {counters['BIN'] - 1} 个）")
+    return image_paths, total
 
 NS = {
     'w': "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
@@ -167,7 +232,7 @@ def text_of_run(r):
                 parts.append(processed_text)
             else:
                 parts.append(t.text)
-    for br in r.findall('.//w:br', NS):
+    for _ in r.findall('.//w:br', NS):
         parts.append('\n')
     return ''.join(parts)
 
@@ -372,6 +437,8 @@ def extract_paragraph_content(node, processed_nodes=None):
             drawing = node.find('.//w:drawing', NS)
             if drawing is not None:
                 inline = drawing.find('.//wp:inline', NS)
+                if inline is None:
+                    inline = drawing.find('.//wp:anchor', NS)
                 if inline is not None:
                     docPr = inline.find('.//wp:docPr', NS)
                     img_name = docPr.get('name', 'Image') if docPr is not None else 'Image'
@@ -381,6 +448,25 @@ def extract_paragraph_content(node, processed_nodes=None):
                         if embed:
                             # 返回图片ID、名称和类型标记
                             results.append(('image', (embed, img_name)))
+
+            wmfData = node.findall('.//{*}imagedata')
+            if wmfData is not None:
+                for imagedata in wmfData:
+                    rel_id = None
+                    # 常见属性名可能为 'r:id' 或 带命名空间的 id（例如 '{...}id'）
+                    for attr_name, attr_val in imagedata.items():
+                        if attr_name.endswith('}id') or attr_name == 'r:id' or attr_name.lower().endswith(':id'):
+                            rel_id = attr_val
+                            break
+                    # 有些 imagedata 使用 o:title 或 title 属性
+                    img_name = imagedata.get('o:title') or imagedata.get('title') or imagedata.get('alt')
+                    if rel_id:
+                        if not img_name:
+                            img_name = 'Image'
+                        # 标记该 image 为 wmf 类型的嵌入（调用方可根据 embed 在 rels 中找到实际文件）
+                        results.append(('wmf', (rel_id, img_name)))
+                        # 不 break，让可能存在的多个 imagedata 都被加入
+
         return results
 
     if tag == 'tbl':
@@ -440,13 +526,29 @@ def merge_superscripts_subscripts(content_items):
 
 def paragraph_items_to_text(content_items, join_with_br=False):
     parts = []
+    global PNG_COUNT
+    global WMF_COUNT
     for ttype, cont in content_items:
         if ttype == 'text':
             parts.append(cont)
         elif ttype == 'math':
             parts.append('$' + cont + '$')
+        elif ttype == 'image':
+            # 处理图片
+            embed_id, img_name = cont
+            doc_name = Path(INPUT_PATH).stem
+            print(f"\n[图片处理] 开始处理图片: {img_name} (ID: {embed_id})")
+            parts.append(f"![{img_name}](../Images/{doc_name}_images/PNG/image{PNG_COUNT}.png)")
+            PNG_COUNT += 1
+        elif ttype == 'wmf':
+            # 处理图片
+            embed_id, img_name = cont
+            doc_name = Path(INPUT_PATH).stem
+            print(f"\n[图片处理] 开始处理图片: {img_name} (ID: {embed_id})")
+            parts.append(f"![{img_name}](../Images/{doc_name}_images/WMF/image{WMF_COUNT}.wmf)")
+            WMF_COUNT += 1
         else:
-            parts.append(cont)
+            parts.append(str(cont))
     text = ''.join(parts)
     if join_with_br:
         # 保留段落间换行为 <br/> 时使用 caller 指定 True
@@ -527,7 +629,8 @@ def paragraph_to_md(p, docx_path=None, output_dir=None):
     """
     texts = []
     pPr = p.find('w:pPr', NS)
-    global IMAGE_COUNT  # 声明使用全局计数器
+    global PNG_COUNT  # 声明使用全局计数器
+    global WMF_COUNT
 
     # 处理标题样式
     if pPr is not None:
@@ -564,9 +667,15 @@ def paragraph_to_md(p, docx_path=None, output_dir=None):
             embed_id, img_name = content
             doc_name = Path(docx_path).stem
             print(f"\n[图片处理] 开始处理图片: {img_name} (ID: {embed_id})")
-            texts.append(f"![{img_name}](../Images/{doc_name}_images/image{IMAGE_COUNT}.png)")
-            IMAGE_COUNT += 1
-
+            texts.append(f"![{img_name}](../Images/{doc_name}_images/PNG/image{PNG_COUNT}.png)")
+            PNG_COUNT += 1
+        elif content_type == 'wmf' and docx_path and output_dir:
+            # 处理图片
+            embed_id, img_name = content
+            doc_name = Path(docx_path).stem
+            print(f"\n[图片处理] 开始处理图片: {img_name} (ID: {embed_id})")
+            texts.append(f"![{img_name}](../Images/{doc_name}_images/WMF/image{WMF_COUNT}.wmf)")
+            WMF_COUNT += 1
         else:
             if content_type == 'superscript':
                 texts.append('^{' + content + '}')
