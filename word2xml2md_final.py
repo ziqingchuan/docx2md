@@ -11,7 +11,7 @@ from lxml import etree
 
 # ==========================
 # 只需修改这一行：传入你的 document.xml 或 .docx 路径（字符串）
-INPUT_PATH = r"example2.docx"
+INPUT_PATH = r"2222.docx"
 # ==========================
 
 # 定义输出目录
